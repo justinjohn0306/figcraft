@@ -1724,15 +1724,16 @@ pub fn refused_override(before: &Document, after: &Document, id: NodeId) -> Opti
     None
 }
 
-/// Whether `a` and `b` resize differently (Hug, Fill or Fixed per axis, min and max sizes). A
-/// text box whose resizing follows a changed auto resize is a text style change instead.
+/// Whether `a` and `b` resize differently (Hug, Fill or Fixed per axis, min and max sizes). On a
+/// text box whose auto resize changed, Hug and Fixed follow it (a text style change); Fill doesn't.
 fn resizing_differs(a: &Node, b: &Node) -> bool {
+    let auto_resize_changed = matches!((&a.kind, &b.kind), (NodeKind::Text(x), NodeKind::Text(y)) if x.auto_resize != y.auto_resize);
     let r = |x: &Node| {
         let c = &x.child_layout;
-        (c.sizing_h, c.sizing_v, c.min_w, c.max_w, c.min_h, c.max_h)
+        let s = |v: Sizing| if auto_resize_changed && v != Sizing::Fill { Sizing::Fixed } else { v };
+        (s(c.sizing_h), s(c.sizing_v), c.min_w, c.max_w, c.min_h, c.max_h)
     };
-    let auto_resize_changed = matches!((&a.kind, &b.kind), (NodeKind::Text(x), NodeKind::Text(y)) if x.auto_resize != y.auto_resize);
-    r(a) != r(b) && !auto_resize_changed
+    r(a) != r(b)
 }
 
 /// Bounded source and parent lookups while a rebase reads an unchanged document.
@@ -1904,11 +1905,11 @@ pub fn rebase_instance(doc: &mut Document, inst: NodeId) {
         if doc.contains(component) { path_map(doc, component, false).into_iter().map(|(k, v)| (v, k)).collect() } else { BTreeMap::new() };
     // Sizes and places differ wherever layout or constraints ran; a different resizing is an override.
     let value_groups = |a: &Node, b: &Node| -> Vec<String> {
-        diff_groups(a, b)
-            .into_iter()
-            .filter(|g| !matches!(*g, "size" | "position") || (*g == "size" && resizing_differs(a, b)))
-            .map(str::to_string)
-            .collect()
+        let mut groups: Vec<String> = diff_groups(a, b).into_iter().filter(|g| !matches!(*g, "size" | "position")).map(str::to_string).collect();
+        if resizing_differs(a, b) {
+            groups.push("size".into());
+        }
+        groups
     };
     let mut updates = Vec::new();
     let mut sources = RebaseSources::new(doc);

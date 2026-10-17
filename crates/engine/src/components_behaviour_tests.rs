@@ -742,6 +742,19 @@ fn imported_resizing_overrides_survive_relayout() {
         crate::components::rebase_instance(doc, k.inst);
     }
     assert!(node(&s, chip).overrides.contains("size"), "{:?}", node(&s, chip).overrides);
+    // A text box that fills where its main is fixed, with another auto resize too (seen in a real
+    // kit's footer): Fill is a resizing override, not part of the text style.
+    let title = k.copy(&s, Layer::Title);
+    {
+        let doc = s.doc_mut().unwrap();
+        let n = doc.node_mut(title).unwrap();
+        n.child_layout.sizing_h = Sizing::Fill;
+        if let NodeKind::Text(t) = &mut n.kind {
+            t.auto_resize = TextAutoResize::Height;
+        }
+        crate::components::rebase_instance(doc, k.inst);
+    }
+    assert!(node(&s, title).overrides.contains("size"), "{:?}", node(&s, title).overrides);
     // The first edit anywhere rebuilds the instance from its main: the resizing stays.
     ex(&mut s, "shape.rectangle", json!({"x": 150, "y": 60, "width": 10, "height": 10, "parent": k.card}));
     healthy(&s);
