@@ -148,6 +148,24 @@ fn overridable_properties_stay_through_main_edits_and_reset() {
             "\"change text properties, including font, weight, size …\"",
         ),
         (
+            "layer size",
+            Layer::Bg,
+            "size",
+            json!({"width": 50}),
+            Some(json!({"width": 150})),
+            |n| n.width.to_string(),
+            "resizing a layer inside an instance is an override (#731)",
+        ),
+        (
+            "resizing",
+            Layer::Chip,
+            "size",
+            json!({"sizingH": "fill"}),
+            None,
+            |n| format!("{:?}", n.child_layout.sizing_h),
+            "Hug, Fill or Fixed inside an instance is an override (#731)",
+        ),
+        (
             "text resizing",
             Layer::Title,
             "textStyle",
@@ -317,26 +335,11 @@ fn what_instances_cannot_override_is_refused() {
         ("rotate a layer", "node.set", json!({"id": "$", "props": {"rotation": 15}}), Layer::Bg, "position and rotation come with the layer's place"),
         ("flip a layer", "object.flipH", json!({"ids": ["$"]}), Layer::Bg, "position"),
         (
-            "resize a layer",
-            "node.set",
-            json!({"id": "$", "props": {"width": 50}}),
-            Layer::Bg,
-            "not among the overridable properties; the instance resizes",
-        ),
-        ("resize a text box", "node.set", json!({"id": "$", "props": {"width": 150}}), Layer::Title, "\"the bounds of any text layers\""),
-        (
             "change constraints",
             "node.set",
             json!({"id": "$", "props": {"constraints": {"horizontal": "right"}}}),
             Layer::Bg,
             "\"any constraints applied to the layers\"",
-        ),
-        (
-            "make a layer fill its auto layout",
-            "node.set",
-            json!({"id": "$", "props": {"sizingH": "fill"}}),
-            Layer::Chip,
-            "resizing comes with the layer's size",
         ),
         (
             "take a layer out of auto layout",
@@ -720,4 +723,32 @@ fn auto_layout_instances_follow_their_main() {
     ex(&mut s, "node.set", json!({"id": chip, "props": {"gap": 12}}));
     assert_eq!(node(&s, i).child_layout.min_w, Some(80.0));
     healthy(&s);
+}
+
+#[test]
+fn imported_resizing_overrides_survive_relayout() {
+    // As a `.fig` import leaves it (#731): a layer inside an instance fills its auto layout where
+    // the main's is fixed, with no override recorded until the instance is linked to its main.
+    let mut s = Session::new();
+    let k = kit(&mut s);
+    let chip = k.copy(&s, Layer::Chip);
+    {
+        let doc = s.doc_mut().unwrap();
+        let n = doc.node_mut(chip).unwrap();
+        n.child_layout.sizing_h = Sizing::Fill;
+        n.child_layout.min_w = Some(30.0);
+        n.width = 112.0;
+        n.overrides.clear();
+        crate::components::rebase_instance(doc, k.inst);
+    }
+    assert!(node(&s, chip).overrides.contains("size"), "{:?}", node(&s, chip).overrides);
+    // The first edit anywhere rebuilds the instance from its main: the resizing stays.
+    ex(&mut s, "shape.rectangle", json!({"x": 150, "y": 60, "width": 10, "height": 10, "parent": k.card}));
+    healthy(&s);
+    let n = node(&s, chip);
+    assert_eq!((n.child_layout.sizing_h, n.child_layout.min_w), (Sizing::Fill, Some(30.0)));
+    assert_eq!(node(&s, k.chip).child_layout.sizing_h, Sizing::Fixed, "the main keeps its own");
+    // Setting it back to the main's resizing clears the override.
+    ex(&mut s, "node.set", json!({"id": chip, "props": {"sizingH": "fixed", "minWidth": null, "width": 20}}));
+    assert!(!node(&s, chip).overrides.contains("size"), "{:?}", node(&s, chip).overrides);
 }

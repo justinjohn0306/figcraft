@@ -30,7 +30,7 @@ pub fn layout_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[Node
     let has_al = matches!(al, Some(Some(_)));
     let title = if has_al { tr("Auto layout") } else { tr("Layout") };
     // An instance's auto layout is its main's (only padding, gap and alignment are its own), and
-    // the layers inside it keep their main's size.
+    // the layers inside it keep their main's grid cell (their size and resizing are overrides).
     let in_instance = sel.iter().any(|i| figcraft_engine::components::owning_instance(doc, *i).is_some());
     let nested = sel.iter().any(|i| figcraft_engine::components::inside_instance(doc, *i));
     let btns: Vec<(Icon, &str)> = if in_instance {
@@ -49,7 +49,7 @@ pub fn layout_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[Node
     if let Some(Some(l)) = &al {
         ui.add_enabled_ui(!in_instance, |ui| direction(app, ui, &ids, l)).response.on_disabled_hover_text(from_main);
     }
-    ui.add_enabled_ui(!nested, |ui| dimensions(app, ui, doc, sel, has_al)).response.on_disabled_hover_text(from_main);
+    dimensions(app, ui, doc, sel, has_al);
     if let Some(Some(l)) = &al {
         alignment(app, ui, &ids, l);
         spacing(app, ui, &ids, l);

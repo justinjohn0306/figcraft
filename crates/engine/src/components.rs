@@ -1105,7 +1105,11 @@ pub fn sync_after_edit(doc: &mut Document, before: &Document, changed: &[NodeId]
             // Switching the main or a property value of an instance isn't an override.
             resync.insert(id);
         }
-        let raw = diff_groups(b, n);
+        let mut raw = diff_groups(b, n);
+        let resized = resizing_differs(b, n);
+        if resized && !raw.contains(&"size") {
+            raw.push("size");
+        }
         let mut groups = raw.clone();
         // An instance's own place, export settings and interactions are its own, not overrides.
         if top_root {
@@ -1114,10 +1118,17 @@ pub fn sync_after_edit(doc: &mut Document, before: &Document, changed: &[NodeId]
         if groups.iter().any(|g| matches!(*g, "size" | "position")) {
             groups.retain(|g| !matches!(*g, "size" | "position") || !geometry_derived(doc, before, id, g));
         }
+        // A new resizing is the user's even when layout then resizes the layer and its ancestors.
+        if resized && !groups.contains(&"size") {
+            groups.push("size");
+        }
         // A value equal to the main's isn't an override (setting it back clears the override).
         let mut cleared = Vec::new();
         if let Some(src) = n.source.and_then(|s| doc.node(s)) {
             let mut differs = diff_groups(src, n);
+            if resizing_differs(src, n) && !differs.contains(&"size") {
+                differs.push("size");
+            }
             if inst == id {
                 differs.retain(|g| *g != "name");
                 if n.name != default_instance_name(doc, src.id) {
@@ -1136,8 +1147,7 @@ pub fn sync_after_edit(doc: &mut Document, before: &Document, changed: &[NodeId]
                     groups.push(g);
                 }
             }
-            cleared =
-                raw.iter().filter(|g| !matches!(**g, "size" | "position") && !differs.contains(g) && n.overrides.contains(**g)).copied().collect();
+            cleared = raw.iter().filter(|g| **g != "position" && !differs.contains(g) && n.overrides.contains(**g)).copied().collect();
             if top_root {
                 cleared.retain(|g| !matches!(*g, "component" | "props"));
             }
@@ -1665,10 +1675,9 @@ pub fn check_override_edit(before: &Document, after: &Document) -> Result<(), St
 
 /// What about layer `id` an edit from `before` to `after` changed that only its main can: the
 /// auto layout of an instance or a layer in one but its padding, gap and alignment, or the
-/// position (rotation too), size, constraints or resizing of a layer inside an instance (the
-/// instance itself resizes, and its layers follow; text whose box follows its content still
-/// does). `None` when the edit is fine, also when the main changed the same way in this edit (a
-/// library update).
+/// position (rotation too), constraints or grid cell of a layer inside an instance (its size and
+/// resizing are overrides, as in Figma). `None` when the edit is fine, also when the main changed
+/// the same way in this edit (a library update).
 pub fn refused_override(before: &Document, after: &Document, id: NodeId) -> Option<&'static str> {
     let (n, b) = (after.node(id)?, before.node(id)?);
     if after.is_remote(id) || n.source != b.source || owning_instance(before, id).is_none() || owning_instance(after, id).is_none() {
@@ -1684,8 +1693,16 @@ pub fn refused_override(before: &Document, after: &Document, id: NodeId) -> Opti
             l
         })
     };
-    let size = |x: &Node| (x.width, x.height);
-    let resized = |x: &Node, y: &Node| (x.width - y.width).abs() > 1e-6 || (x.height - y.height).abs() > 1e-6;
+    // Child layout but resizing (absolute position, grid cell).
+    let placement = |x: &Node| ChildLayout {
+        sizing_h: Sizing::Fixed,
+        sizing_v: Sizing::Fixed,
+        min_w: None,
+        max_w: None,
+        min_h: None,
+        max_h: None,
+        ..x.child_layout.clone()
+    };
     if mode(n) != mode(b) && mode(ma) == mode(mb) {
         return Some("The auto layout direction");
     }
@@ -1698,16 +1715,24 @@ pub fn refused_override(before: &Document, after: &Document, id: NodeId) -> Opti
     if n.transform != b.transform && ma.transform == mb.transform && !geometry_derived(after, before, id, "position") {
         return Some("A layer's position");
     }
-    if resized(n, b) && size(ma) == size(mb) && !geometry_derived(after, before, id, "size") {
-        return Some("A layer's size");
-    }
     if n.constraints != b.constraints && ma.constraints == mb.constraints {
         return Some("A layer's constraints");
     }
-    if n.child_layout != b.child_layout && ma.child_layout == mb.child_layout {
-        return Some("A layer's resizing");
+    if placement(n) != placement(b) && placement(ma) == placement(mb) {
+        return Some("A layer's place in its auto layout");
     }
     None
+}
+
+/// Whether `a` and `b` resize differently (Hug, Fill or Fixed per axis, min and max sizes). A
+/// text box whose resizing follows a changed auto resize is a text style change instead.
+fn resizing_differs(a: &Node, b: &Node) -> bool {
+    let r = |x: &Node| {
+        let c = &x.child_layout;
+        (c.sizing_h, c.sizing_v, c.min_w, c.max_w, c.min_h, c.max_h)
+    };
+    let auto_resize_changed = matches!((&a.kind, &b.kind), (NodeKind::Text(x), NodeKind::Text(y)) if x.auto_resize != y.auto_resize);
+    r(a) != r(b) && !auto_resize_changed
 }
 
 /// Bounded source and parent lookups while a rebase reads an unchanged document.
@@ -1877,8 +1902,13 @@ pub fn rebase_instance(doc: &mut Document, inst: NodeId) {
     let mine = path_map(doc, inst, true);
     let theirs: BTreeMap<String, NodeId> =
         if doc.contains(component) { path_map(doc, component, false).into_iter().map(|(k, v)| (v, k)).collect() } else { BTreeMap::new() };
+    // Sizes and places differ wherever layout or constraints ran; a different resizing is an override.
     let value_groups = |a: &Node, b: &Node| -> Vec<String> {
-        diff_groups(a, b).into_iter().filter(|g| !matches!(*g, "size" | "position")).map(str::to_string).collect()
+        diff_groups(a, b)
+            .into_iter()
+            .filter(|g| !matches!(*g, "size" | "position") || (*g == "size" && resizing_differs(a, b)))
+            .map(str::to_string)
+            .collect()
     };
     let mut updates = Vec::new();
     let mut sources = RebaseSources::new(doc);
